@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments and local env files
+.venv/
+venv/
+.env
+.env.*
+
+# Editors and notebooks
+.idea/
+.vscode/
+.ipynb_checkpoints/
+
+# OS / temp
+.DS_Store
+*.tmp
+*.swp
+nohup.out
+
+# Runtime outputs and experiment products
+artifacts/
+logs/
+outputs/
+results/
+runs/
+wandb/
+checkpoints/
+archive/
+
+# Data and caches
+datanew/
+data/cache_lmdb/
+data/artifacts/
+*.lmdb
+*.mdb
+
+# Model and binary artifacts
+*.pt
+*.pth
+*.ckpt
+*.pkl
+*.joblib
+*.npz
+*.npy
+*.bin
+*.wandb
+
+# Reports generated during audits / experiments
+*.log

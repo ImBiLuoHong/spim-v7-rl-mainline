@@ -1,0 +1,24 @@
+# Core ML/DL packages
+torch>=2.0.0
+torchvision>=0.15.0
+torch-geometric>=2.0.0
+
+# Data processing
+numpy==2.3.3
+pandas==2.2.2
+scipy==1.16.2
+scikit-learn==1.7.1
+
+# Visualization
+matplotlib==3.10.6
+tensorboard==2.20.0
+
+# Utilities
+PyYAML==6.0.2
+tqdm==4.67.1
+psutil==5.9.8
+xxhash==3.6.0
+
+# Network/scientific
+networkx==3.5
+lmdb>=1.4.0

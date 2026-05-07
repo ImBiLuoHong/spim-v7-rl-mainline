@@ -1,0 +1,21 @@
+{
+  "official_training_entry": "src/scripts/train_phase4_end2end.py",
+  "archived_paths": [
+    "src/training/legacy/runner_env_legacy.py",
+    "src/training/legacy/runner_cfg_legacy.py",
+    "src/training/legacy/model_builder_legacy.py"
+  ],
+  "deleted_paths": [
+    "src/training/runner.py::legacy_run_train_with_env_logic",
+    "src/training/runner.py::legacy_run_train_with_cfg_logic",
+    "src/training/engine/runner_env.py::legacy_env_runner_logic",
+    "src/training/engine/runner_cfg.py::legacy_cfg_runner_logic",
+    "src/training/engine/model_builder.py::legacy_training_engine_model_builder_logic",
+    "src/scripts/main_cli.py::train_mem_runnable_path"
+  ],
+  "source_validity_removed_from_mainline": true,
+  "physics_pruning_preserved": true,
+  "support_mainline_smoke_passed": true,
+  "training_ready": "yes",
+  "remaining_blockers": []
+}
