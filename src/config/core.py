@@ -72,8 +72,8 @@ class PathConfig:
         # V6 新增核心路径
         # 指向 datanew/production_data/foundation_...
         self.foundation_path = os.path.join(root_dir, 'datanew', 'production_data', 'foundation_20260114_164946_86d5023e')
-        # 指向 datanew/subgraphs (Updated for V11)
-        self.samples_path = os.path.join(self.foundation_path, 'subgraph_v11_prod')
+        # 指向压缩后的 V12 indexer subgraphs；V11 dense 仅作为离线转换源。
+        self.samples_path = os.path.join(self.foundation_path, 'subgraph_v12')
         
         # Explicitly define split_dir to point to the splits in data/
         self.split_dir = os.path.join(root_dir, 'data')
