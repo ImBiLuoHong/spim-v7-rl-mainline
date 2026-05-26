@@ -158,6 +158,14 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--train-full-max-cases", type=int, default=256)
     parser.add_argument("--train-full-cache-version", type=str, default="train_full_rlpilot_n256_v1")
+    parser.add_argument("--train-foundation-path", type=str, default="")
+    parser.add_argument("--train-samples-path", type=str, default="")
+    parser.add_argument("--train-split-dir", type=str, default="")
+    parser.add_argument(
+        "--eval-on-train-cases",
+        action="store_true",
+        help="Use the loaded train-full cases as the evaluation panel; useful for dataset-adapter smoke tests.",
+    )
 
     parser.add_argument("--paper-like-alpha", type=float, default=0.55)
     parser.add_argument("--paper-like-topk-fraction", type=float, default=0.12)
@@ -402,6 +410,9 @@ def load_train_full_cases(
     cache_dir: Path,
     max_cases: int,
     cache_version: str,
+    foundation_path: str = "",
+    samples_path: str = "",
+    split_dir: str = "",
 ) -> Tuple[List[CaseRecord], Dict[str, Any], Path]:
     source_summary = read_json(source_root / "summary.json")
     oracle_root = Path(source_summary["same_case_manifest"]["oracle_root"])
@@ -413,6 +424,14 @@ def load_train_full_cases(
 
     cfg = Config(root_dir=str(PROJECT_ROOT))
     cfg.apply_overrides(payload)
+    if str(foundation_path).strip():
+        cfg.paths.foundation_path = str(foundation_path).strip()
+        cfg.paths.node_map_path = str(Path(cfg.paths.foundation_path) / "node_mapping.csv")
+        cfg.paths.pipe_map_path = str(Path(cfg.paths.foundation_path) / "pipe_map.csv")
+    if str(samples_path).strip():
+        cfg.paths.samples_path = str(samples_path).strip()
+    if str(split_dir).strip():
+        cfg.paths.split_dir = str(split_dir).strip()
     cfg.training.enable_eval = False
     cfg.training.train_only = True
     cfg.training.enable_wandb = False
@@ -3521,6 +3540,9 @@ def main() -> None:
         cache_dir=cache_dir,
         max_cases=int(args.train_full_max_cases),
         cache_version=str(args.train_full_cache_version),
+        foundation_path=str(args.train_foundation_path),
+        samples_path=str(args.train_samples_path),
+        split_dir=str(args.train_split_dir),
     )
     train_runtime = {
         "cases": train_cases,
@@ -3530,6 +3552,10 @@ def main() -> None:
         "episode_duration_min": float(exact_runtime["episode_duration_min"]),
         "frontier_role_mode": str(exact_runtime["frontier_role_mode"]),
     }
+    if bool(args.eval_on_train_cases):
+        exact_runtime = dict(exact_runtime)
+        exact_runtime["cases"] = train_runtime["cases"]
+        exact_runtime["dataset_assets"] = train_runtime["dataset_assets"]
 
     if str(args.teacher_family) == "auto":
         teacher_decision = auto_select_teacher(precheck_root)
@@ -4543,6 +4569,10 @@ def main() -> None:
         "source_root": str(source_root),
         "cache_dir": str(cache_dir),
         "train_full_cache_version": str(args.train_full_cache_version),
+        "train_foundation_path_override": str(args.train_foundation_path),
+        "train_samples_path_override": str(args.train_samples_path),
+        "train_split_dir_override": str(args.train_split_dir),
+        "eval_on_train_cases": bool(args.eval_on_train_cases),
         "foundation_graph_path": str(resolve_foundation_graph_path(source_root)),
         "train_full_case_count": int(len(train_runtime["cases"])),
         "exact136_case_count": int(len(exact_runtime["cases"])),

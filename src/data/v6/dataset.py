@@ -16,6 +16,71 @@ from .topology import HydraulicTopology
 logger = logging.getLogger(__name__)
 
 
+def _npz_scalar_to_str(value):
+    if isinstance(value, np.ndarray) and value.shape == ():
+        return str(value.item())
+    return str(value)
+
+
+def _is_v12_indexer_record(record) -> bool:
+    return (
+        'sample_path' in record
+        and 'foundation_dir' in record
+        and 'global_node_indices' in record
+        and 'global_edge_indices' in record
+        and 'data' not in record
+        and 'x' not in record
+    )
+
+
+def decode_v12_indexer_record(record, *, sample_cache=None):
+    """
+    Reconstruct the V11-style node time-series from a V12 indexer NPZ record.
+
+    V12 stores only references to the sparse raw sample plus global node/edge
+    indices. The downstream dataset already rebuilds topology from the
+    foundation graph, so the critical compatibility field here is `x`.
+    """
+    sample_path = _npz_scalar_to_str(record['sample_path'])
+    if sample_cache is not None and sample_path in sample_cache:
+        sparse_data, sample_node_indices = sample_cache[sample_path]
+    else:
+        with np.load(sample_path, allow_pickle=True) as sample:
+            sparse_data = np.array(sample['data'])
+            sample_node_indices = np.array(sample['node_indices'])
+        if sample_cache is not None:
+            if len(sample_cache) >= 64:
+                sample_cache.pop(next(iter(sample_cache)))
+            sample_cache[sample_path] = (sparse_data, sample_node_indices)
+    global_node_indices = record['global_node_indices']
+
+    if sparse_data.ndim == 3:
+        # Upstream V12 raw samples are [T, C, M_sparse].
+        t_steps, channels, _ = sparse_data.shape
+    elif sparse_data.ndim == 2:
+        t_steps, _ = sparse_data.shape
+        channels = 1
+    else:
+        raise ValueError(f"Unsupported V12 sparse data shape: {sparse_data.shape}")
+
+    global_to_sparse = {int(gid): pos for pos, gid in enumerate(sample_node_indices)}
+    x = np.zeros((t_steps, channels, len(global_node_indices)), dtype=np.float32)
+    for local_pos, gid in enumerate(global_node_indices):
+        sparse_pos = global_to_sparse.get(int(gid))
+        if sparse_pos is None:
+            continue
+        if sparse_data.ndim == 3:
+            x[:, :, local_pos] = sparse_data[:, :, sparse_pos]
+        else:
+            x[:, 0, local_pos] = sparse_data[:, sparse_pos]
+
+    decoded = {key: record[key] for key in record.files}
+    # Match upstream V12 loader: [T, N, C]. Existing shape correction below
+    # converts this to the internal [N, T, C] layout.
+    decoded['x'] = np.transpose(x, (0, 2, 1)).astype(np.float32)
+    return decoded
+
+
 def derive_signed_stt_series(edge_attr_dynamic: torch.Tensor) -> torch.Tensor:
     """
     Convert foundation dynamic edge channels into a signed STT series aligned with edge_index.
@@ -99,6 +164,7 @@ class NpzDatasetV6(Dataset):
         self.edge_config = edge_config or {'dim': 8, 'channels': {}}
         self.feature_mode = feature_mode
         self.topology = None
+        self._v12_sample_cache = {}
         
         # [AUDIT] Force Disable Preload in Audit Mode
         if self.audit_mode:
@@ -126,7 +192,7 @@ class NpzDatasetV6(Dataset):
             if os.path.exists(split_file):
                 logger.info(f"[V6Loader] Loading split from {split_file}")
                 with open(split_file, 'r') as f:
-                    raw_files = [line.strip() for line in f if line.strip()]
+                    raw_files = [self._resolve_split_entry(line.strip()) for line in f if line.strip()]
             else:
                 logger.warning(f"[V6Loader] Split file {split_file} not found. Fallback to directory scan.")
                 try:
@@ -287,6 +353,31 @@ class NpzDatasetV6(Dataset):
         # This is an instance method, so 'self' is passed.
         # On Linux fork, 'self' is valid and points to the forked memory.
         return self._load_group(idx)
+
+    def _resolve_split_entry(self, path_text):
+        """Map split-file entries onto the active samples_dir when explicitly changed."""
+        path_text = str(path_text).strip()
+        if not path_text:
+            return path_text
+
+        samples_abs = os.path.abspath(self.samples_dir)
+        if os.path.isabs(path_text):
+            path_abs = os.path.abspath(path_text)
+            try:
+                if os.path.commonpath([samples_abs, path_abs]) == samples_abs:
+                    return path_text
+            except ValueError:
+                pass
+
+            candidate = os.path.join(self.samples_dir, os.path.basename(path_text))
+            if os.path.exists(candidate) or os.path.basename(samples_abs) == 'subgraph_v12':
+                return candidate
+            return path_text
+
+        candidate = os.path.join(self.samples_dir, path_text)
+        if os.path.exists(candidate):
+            return candidate
+        return path_text
 
 
     def _group_files(self, file_list):
@@ -495,23 +586,28 @@ class NpzDatasetV6(Dataset):
             
         try:
             with np.load(file_path, allow_pickle=True) as f:
+                record = (
+                    decode_v12_indexer_record(f, sample_cache=self._v12_sample_cache)
+                    if _is_v12_indexer_record(f)
+                    else f
+                )
                 # 1. Raw Data & Indices
-                if 'data' in f:
-                    x_raw = torch.from_numpy(f['data']).float().permute(2, 0, 1) # (N, T, C)
-                elif 'x' in f:
-                    x_raw = torch.from_numpy(f['x']).float()
+                if 'data' in record:
+                    x_raw = torch.from_numpy(record['data']).float().permute(2, 0, 1) # (N, T, C)
+                elif 'x' in record:
+                    x_raw = torch.from_numpy(record['x']).float()
                     if x_raw.dim() == 2:
                         x_raw = x_raw.unsqueeze(1)
                 else:
                     return None 
                 
                 # Global Indices
-                if 'node_indices' in f:
-                    global_ids = torch.from_numpy(f['node_indices']).long()
-                elif 'global_node_index' in f:
-                    global_ids = torch.from_numpy(f['global_node_index']).long()
-                elif 'global_node_indices' in f:
-                    global_ids = torch.from_numpy(f['global_node_indices']).long()
+                if 'node_indices' in record:
+                    global_ids = torch.from_numpy(record['node_indices']).long()
+                elif 'global_node_index' in record:
+                    global_ids = torch.from_numpy(record['global_node_index']).long()
+                elif 'global_node_indices' in record:
+                    global_ids = torch.from_numpy(record['global_node_indices']).long()
                 else:
                     return None
                 
@@ -555,16 +651,16 @@ class NpzDatasetV6(Dataset):
                 global_start_step = 0 # Default to 0
                 
                 # 1. Extract Metadata (Priority for V11/V6)
-                if 'trigger_node_index' in f:
-                     trigger_global_idx = int(f['trigger_node_index'])
-                elif 'global_trigger_node' in f:
-                     trigger_global_idx = int(f['global_trigger_node'])
+                if 'trigger_node_index' in record:
+                     trigger_global_idx = int(record['trigger_node_index'])
+                elif 'global_trigger_node' in record:
+                     trigger_global_idx = int(record['global_trigger_node'])
                 
-                if 'trigger_time_step' in f:
-                     trigger_time_step = int(f['trigger_time_step'])
+                if 'trigger_time_step' in record:
+                     trigger_time_step = int(record['trigger_time_step'])
 
-                if 'global_start_step' in f:
-                     global_start_step = int(f['global_start_step'])
+                if 'global_start_step' in record:
+                     global_start_step = int(record['global_start_step'])
 
                 if idx < 3: logger.info(f"[Debug] File {idx}: trigger_time_step={trigger_time_step}, global_start_step={global_start_step}")
                 
@@ -594,12 +690,12 @@ class NpzDatasetV6(Dataset):
                 # Conclusion: Use trigger_time_step AS IS for indexing x_raw.
                 # For Topology (Absolute Time), use global_start_step + trigger_time_step.
                 
-                if 'global_injection_node' in f:
-                    source_global_idx = int(f['global_injection_node'])
-                elif 'injection_node_index' in f:
-                    source_global_idx = int(f['injection_node_index'])
-                elif 'label' in f:
-                    source_global_idx = int(f['label'][0])
+                if 'global_injection_node' in record:
+                    source_global_idx = int(record['global_injection_node'])
+                elif 'injection_node_index' in record:
+                    source_global_idx = int(record['injection_node_index'])
+                elif 'label' in record:
+                    source_global_idx = int(record['label'][0])
 
                 # 2. Construct Y (Priority: Metadata > File Y)
                 # Fix for Alignment Issue: Reconstruct y from source_global_idx to ensure consistency
@@ -613,10 +709,10 @@ class NpzDatasetV6(Dataset):
                         y_constructed = True
                     # Note: If source is not in subgraph, y remains all zeros.
                 
-                if not y_constructed and 'y' in f:
+                if not y_constructed and 'y' in record:
                      # Fallback to stored y only if we couldn't reconstruct from metadata
                      if source_global_idx == -1:
-                        y_stored = torch.from_numpy(f['y']).float()
+                        y_stored = torch.from_numpy(record['y']).float()
                         if y_stored.shape[0] == x_raw.shape[0]:
                              y = y_stored
                         else:
@@ -626,17 +722,17 @@ class NpzDatasetV6(Dataset):
                 # RPE Features
                 rpe_stt = torch.zeros(x_raw.shape[0])
                 rpe_euc = torch.zeros(x_raw.shape[0])
-                if 'node_rpe_stt' in f:
-                    rpe_stt = torch.from_numpy(f['node_rpe_stt']).float()
-                if 'node_rpe_euclidean' in f:
-                    rpe_euc = torch.from_numpy(f['node_rpe_euclidean']).float()
+                if 'node_rpe_stt' in record:
+                    rpe_stt = torch.from_numpy(record['node_rpe_stt']).float()
+                if 'node_rpe_euclidean' in record:
+                    rpe_euc = torch.from_numpy(record['node_rpe_euclidean']).float()
 
                 # Group Label / View Type
                 g_lbl = 'B' # Default
-                if 'group_label' in f:
-                    g_lbl = str(f['group_label'])
-                elif 'view_type' in f:
-                    g_lbl = str(f['view_type'])
+                if 'group_label' in record:
+                    g_lbl = _npz_scalar_to_str(record['group_label'])
+                elif 'view_type' in record:
+                    g_lbl = _npz_scalar_to_str(record['view_type'])
                 else:
                     # Fallback to filename parsing
                     fname = os.path.basename(file_path)
